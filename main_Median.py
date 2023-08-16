@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 import torch
 import torch.utils
@@ -26,52 +28,52 @@ def args_parser():
     parser.add_argument('--momentum', type=float, default=0.5, help="SGD momentum")
     parser.add_argument('--dp', type=bool, default=True, help="whether add differential noise")
     parser.add_argument('--dp_epsilon', type=float, default=0.4, help='differential privacy budget')
-    parser.add_argument('--dp_epsilon1', type=float, default=0.08, help='differential privacy budget')
+    parser.add_argument('--dp_epsilon1', type=float, default=0.4, help='differential privacy budget')
     parser.add_argument('--dp_delta', type=float, default=1e-5, help='differential privacy relaxation term')
     parser.add_argument('--dp_clip', type=float, default=300.0, help='differential privacy clip')
-    parser.add_argument('--flip', type=bool, default=False, help='flip symbol of weight')
     parser.add_argument('--bs', type=int, default=64, help="batch size")
     parser.add_argument('--round', type=int, default=100, help="communication round")
     parser.add_argument('--labda', type=float, default=1.0, help="lambda")
     return parser.parse_args()
 
 
-def Median_AG(weights_list, k):
-    # 1. 将模型权重分为k组
-    groups = [weights_list[i::k] for i in range(k)]
+def aggregate_median(model_params_list, k):
+    # 1. Divide the model parameters into k groups
+    groups = [model_params_list[i::k] for i in range(k)]
 
-    # 2. 求每组模型权重的平均值
-    averaged_weights = []
+    # 2. Compute the average weights for each group
+    averaged_weights_list = []
     for group in groups:
-        # 创建一个和第一个模型权重相同形状的全零张量
-        average_weight = copy.deepcopy(group[0])
-        for k in average_weight.keys():
-            average_weight[k] = torch.zeros_like(group[0][k])
-        for weight_dict in group:
-            for k in average_weight.keys():
-                average_weight[k] += weight_dict[k]
-        for key in average_weight.keys():
-            average_weight[key] /= len(group)
-        averaged_weights.append(average_weight)
+        # Initialize averaged_weights with zeros
+        averaged_weights = copy.deepcopy(group[0])
+        for key in averaged_weights.keys():
+            averaged_weights[key] = torch.zeros_like(group[0][key])
+        # Sum the weights of the group
+        for model_params in group:
+            for key in averaged_weights.keys():
+                averaged_weights[key] += model_params[key]
+        # Divide by number of models in the group to get average
+        for key in averaged_weights.keys():
+            averaged_weights[key] /= len(group)
+        averaged_weights_list.append(averaged_weights)
 
-    # 3. 从所有的模型权重的平均值中求出中位数
-    median_weight = copy.deepcopy(averaged_weights[0])
-    for key in median_weight.keys():
-        median_weight[key] = torch.zeros_like(averaged_weights[0][key])
+    # 3. Compute the median weight from all the averaged weights
+    aggregated_weights = copy.deepcopy(averaged_weights_list[0])
+    for key in averaged_weights_list[0].keys():
+        # Stack the tensors along a new dimension to use sorting and median calculation
+        stacked_tensors = torch.stack([aw[key] for aw in averaged_weights_list], dim=0)
+        sorted_tensors, _ = torch.sort(stacked_tensors, dim=0)
 
-    # 获取第一个权重字典的键
-    keys = list(averaged_weights[0].keys())
+        mid_index = len(averaged_weights_list) // 2
+        if len(averaged_weights_list) % 2 == 0:  # Even number of averaged weights
+            median_tensor = (sorted_tensors[mid_index - 1] + sorted_tensors[mid_index]) / 2.0
+        else:  # Odd number
+            median_tensor = sorted_tensors[mid_index]
 
-    # 对于每一层权重
-    for key in keys:
-        # 获取这一层的所有权重
-        layer_weights = [weight_dict[key] for weight_dict in averaged_weights]
-        # 计算中位数
-        median_layer_weight = torch.median(torch.stack(layer_weights), dim=0)[0]
-        # 将中位数权重存入字典
-        median_weight[key] = median_layer_weight
+        aggregated_weights[key] = median_tensor
 
-    return median_weight
+    return aggregated_weights
+
 
 acc_list = []
 
@@ -86,10 +88,12 @@ if __name__ == '__main__':
     else:
         agent_model = model_2.CIFAR_CNN_Net()
     # torch.save(agent_model.state_dict(), './model_weight.pth')
+    malicious_indices = random.sample(range(40), 18)
 
     dataset_train, dataset_test = dataset.get_dataset(args=args)
     # 创建并初始化训练者和验证者字典（实例化）
-    trainer_dict = {idx: Trainer(args, agent_model, dataset_train, dataset_test, id=idx) for idx in range(args.trainer_num)}
+    trainer_dict = {idx: Trainer(args, agent_model, dataset_train, dataset_test, idx, malicious_indices) for idx in
+                    range(args.trainer_num)}
     verifier_dict = {idx: Verifier(args, dataset_test, agent_model, id=idx) for idx in range(args.verifier_num)}
     if args.dataset == 'mnist':
         net = model_2.MNIST_CNN_Net()
@@ -102,37 +106,24 @@ if __name__ == '__main__':
         acc_dict = dict()
         loss_dict = dict()
         data_num_dict = dict()
+        trainer_indices = random.sample(range(40), 18)
 
         for trainer_idx in trainer_dict.keys():
 
             trainer = trainer_dict[trainer_idx]
-            w, acc, loss, data_num = trainer.local_update(device)
+            w, acc, loss, data_num = trainer.local_update(device, round)
 
             # 添加噪声
             if args.dp:
                 net.load_state_dict(w)
-                if trainer_idx in [0, 1, 2, 3, 4, 5]:
+
+                if trainer_idx in trainer_indices:
                     noised_net = add_extra_noise(device, args, net, dataset_train)
                 else:
                     noised_net = add_noise(device, args, net, dataset_train)
                 noised_w = noised_net.state_dict()
-                # 翻转权重符号
-                if args.flip:
-                    if trainer_idx in [0, 1, 2, 3, 4, 5]:
-                        flipped_w = copy.deepcopy(noised_w)
-                        for key in flipped_w.keys():
-                            if "weight" in key or "bias" in key:  # 只翻转权重和偏置
-                                num_weights_to_flip = int(flipped_w[key].numel() * 6 / 7)
-                                indices_to_flip = torch.randperm(flipped_w[key].numel())[:num_weights_to_flip]
-                                flattened_weights = flipped_w[key].flatten()
-                                flattened_weights[indices_to_flip] = -flattened_weights[indices_to_flip]
-                                flipped_w[key] = flattened_weights.reshape(flipped_w[key].shape)
-                        params_dict[trainer_idx] = flipped_w
+                params_dict[trainer_idx] = noised_w
 
-                    else:
-                        params_dict[trainer_idx] = noised_w
-                else:
-                    params_dict[trainer_idx] = noised_w
             else:
                 params_dict[trainer_idx] = w
 
@@ -140,11 +131,13 @@ if __name__ == '__main__':
             loss_dict[trainer_idx] = loss
             data_num_dict[trainer_idx] = len(data_num)
 
-            print("----Round: {}----  trainer: {} ----Train Acc: {:.2f}----- Loss: {:.4f}------".format(round, trainer_idx, acc, loss))
+            print("----Round: {}----  trainer: {} ----Train Acc: {:.2f}----- Loss: {:.4f}------".format(round,
+                                                                                                        trainer_idx,
+                                                                                                        acc, loss))
 
         params = list(params_dict.values())
 
-        global_model = Median_AG(params, k=5)
+        global_model = aggregate_median(params, 8)
         # agent_model.load_state_dict(global_model)
         # torch.save(agent_model.state_dict(), './model_weight2.pth')
         verifier = agent.Agent(args, dataset_test, global_model)
@@ -153,7 +146,7 @@ if __name__ == '__main__':
 
         print(f'----total acc:{total_acc:.2f}----')
 
-        with open('./pic/noise_attack_com1.txt', 'a') as f:
+        with open('pic/backdoor_attack_com_45.txt', 'a') as f:
             f.write(str(total_acc) + '\n')
 
         for trainer_idx in trainer_dict.keys():
@@ -161,7 +154,7 @@ if __name__ == '__main__':
             trainer.set_model_params(global_model)
 
     plt.figure()
-    plt.plot(acc_list, label='MedianAVG')
+    plt.plot(acc_list, label='Median-AVG')
     plt.title('Global Model Accuracy')
     plt.xlabel('Rounds')
     plt.ylabel('Accuracy')

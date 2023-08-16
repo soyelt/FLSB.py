@@ -1,9 +1,9 @@
+import copy
 import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import model_2
 
 
 # 定义自动编码器模型
@@ -100,6 +100,7 @@ def cal_mu_sigma(params_dict, device):
 
 
 def anomaly_score(params_dict, device):
+    params_dict = copy.deepcopy(params_dict)
     A_i_dict = dict()
     beta = 2
     sigma_fi, mu_fi, minimum_error, reconstruction_errors = cal_mu_sigma(params_dict, device)
@@ -112,28 +113,37 @@ def anomaly_score(params_dict, device):
             a_ix = reconstruction_errors[id] / minimum_error
         a_i_dict[id] = a_ix
 
-    for id in reconstruction_errors.keys():
+    for idx in reconstruction_errors.keys():
 
-        A_i = math.exp(beta * (1-a_i_dict[id]))
-        A_i_dict[id] = A_i
+        A_i = math.exp(beta * (1-a_i_dict[idx]))
+        A_i_dict[idx] = A_i
 
     return A_i_dict
 
 
-def cal_diff(trainer_idx_verifier_loss, loss_dict, trainer_idx):
+def cal_diff(trainer_idx_verifier_loss, loss_dict):
 
-    V_ij = 0
-    for id in range(len(trainer_idx_verifier_loss)):
-        V_ij += abs(trainer_idx_verifier_loss[id] - loss_dict[trainer_idx])
-
-    G_ij = 0
-    for idx in loss_dict.keys():
+    V_ij_dict = dict()
+    for trainer_idx in loss_dict.keys():
+        V_ij = 0
         for id in range(len(trainer_idx_verifier_loss)):
-            G_ij += abs(trainer_idx_verifier_loss[id] - loss_dict[idx])
+            V_ij += abs(trainer_idx_verifier_loss[id] - loss_dict[trainer_idx])
+        V_ij_dict[trainer_idx] = V_ij
 
-    diff_i = V_ij * len(trainer_idx_verifier_loss) / G_ij
+    G_ij_dict = dict()
+    for trainer_idx in loss_dict.keys():
+        v_ij = 0
+        for idx in range(len(trainer_idx_verifier_loss)):
+            v_ij += abs(trainer_idx_verifier_loss[idx] - loss_dict[trainer_idx])
+        G_ij_dict[trainer_idx] = v_ij
+    G_ij = sum(G_ij_dict)
 
-    return diff_i
+    diff_list = []
+    for trainer_idx in loss_dict.keys():
+        diff_i = V_ij_dict[trainer_idx] * len(trainer_idx_verifier_loss) * len(loss_dict) / G_ij
+        diff_list.append(diff_i)
+
+    return diff_list
 
 
 def trust_score(diff_i_dict, sum_Gi):
@@ -146,17 +156,13 @@ def trust_score(diff_i_dict, sum_Gi):
     return R_i
 
 
-def cal_agg_weight(round, loss_dict, params_dict, R_i_dict, trainer_dict, data_num_dict, device):
-    A_i_dict = anomaly_score(params_dict, device)
+def cal_agg_weight(round, loss_dict, R_i_dict, trainer_dict, data_num_dict, A_i_dict):
+
     score_i_dict = dict()
-    if round <= 40:
-        for id in loss_dict.keys():
-            score_i = (1 - loss_dict[id] / sum(loss_dict.values())) * A_i_dict[id]
-            score_i_dict[id] = score_i
-    else:
-        for id in loss_dict.keys():
-            score_i = (1 - loss_dict[id] / sum(loss_dict.values())) * A_i_dict[id] * R_i_dict[id]
-            score_i_dict[id] = score_i
+
+    for id in loss_dict.keys():
+        score_i = (1 - loss_dict[id] / sum(loss_dict.values())) * A_i_dict[id] * R_i_dict[id]
+        score_i_dict[id] = score_i
 
     weighted_data_num_sum = 0
     for trainer_idx in trainer_dict.keys():

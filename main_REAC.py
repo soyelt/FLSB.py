@@ -1,3 +1,5 @@
+import random
+
 import numpy as np
 import torch
 import torch.utils
@@ -27,13 +29,11 @@ def args_parser():
     parser.add_argument('--momentum', type=float, default=0.5, help="SGD momentum")
     parser.add_argument('--dp', type=bool, default=True, help="whether add differential noise")
     parser.add_argument('--dp_epsilon', type=float, default=0.4, help='differential privacy budget')
-    parser.add_argument('--dp_epsilon1', type=float, default=0.08, help='differential privacy budget')
+    parser.add_argument('--dp_epsilon1', type=float, default=0.4, help='differential privacy budget')
     parser.add_argument('--dp_delta', type=float, default=1e-5, help='differential privacy relaxation term')
     parser.add_argument('--dp_clip', type=float, default=300.0, help='differential privacy clip')
-    parser.add_argument('--flip', type=bool, default=False, help='flip symbol of weight')
     parser.add_argument('--bs', type=int, default=64, help="batch size")
     parser.add_argument('--round', type=int, default=100, help="communication round")
-    parser.add_argument('--round1', type=int, default=3, help='times of verifiers verify ')
     parser.add_argument('--labda', type=float, default=1.0, help="lambda")
     return parser.parse_args()
 
@@ -65,10 +65,11 @@ if __name__ == '__main__':
     else:
         agent_model = model_2.CIFAR_CNN_Net()
     # torch.save(agent_model.state_dict(), './model_weight.pth')
+    malicious_indices = random.sample(range(40), 18)
 
     dataset_train, dataset_test = dataset.get_dataset(args=args)
     # 创建并初始化训练者和验证者字典（实例化）
-    trainer_dict = {idx: Trainer(args, agent_model, dataset_train, dataset_test, id=idx) for idx in range(args.trainer_num)}
+    trainer_dict = {idx: Trainer(args, agent_model, dataset_train, dataset_test, idx, malicious_indices) for idx in range(args.trainer_num)}
     verifier_dict = {idx: Verifier(args, dataset_test, agent_model, id=idx) for idx in range(args.verifier_num)}
     if args.dataset == 'mnist':
         net = model_2.MNIST_CNN_Net()
@@ -81,37 +82,26 @@ if __name__ == '__main__':
         acc_dict = dict()
         loss_dict = dict()
         data_num_dict = dict()
+        trainer_indices = random.sample(range(40), 18)
+        verifier_indices = random.sample(range(20), 9)
+        # print(trainer_indices)
+        # print(verifier_indices)
 
         for trainer_idx in trainer_dict.keys():
 
             trainer = trainer_dict[trainer_idx]
-            w, acc, loss, data_num = trainer.local_update(device)
+            w, acc, loss, data_num = trainer.local_update(device, round)
 
             # 添加噪声
             if args.dp:
                 net.load_state_dict(w)
-                if trainer_idx in [0, 1, 2, 3, 4, 5]:
+                if trainer_idx in trainer_indices:
                     noised_net = add_extra_noise(device, args, net, dataset_train)
                 else:
                     noised_net = add_noise(device, args, net, dataset_train)
                 noised_w = noised_net.state_dict()
-                # 翻转权重符号
-                if args.flip:
-                    if trainer_idx in [0, 1, 2, ]:
-                        flipped_w = copy.deepcopy(noised_w)
-                        for key in flipped_w.keys():
-                            if "weight" in key or "bias" in key:  # 只翻转权重和偏置
-                                num_weights_to_flip = int(flipped_w[key].numel() * 6 / 7)
-                                indices_to_flip = torch.randperm(flipped_w[key].numel())[:num_weights_to_flip]
-                                flattened_weights = flipped_w[key].flatten()
-                                flattened_weights[indices_to_flip] = -flattened_weights[indices_to_flip]
-                                flipped_w[key] = flattened_weights.reshape(flipped_w[key].shape)
-                        params_dict[trainer_idx] = flipped_w
+                params_dict[trainer_idx] = noised_w
 
-                    else:
-                        params_dict[trainer_idx] = noised_w
-                else:
-                    params_dict[trainer_idx] = noised_w
             else:
                 params_dict[trainer_idx] = w
 
@@ -121,13 +111,15 @@ if __name__ == '__main__':
 
             print("----Round: {}----  trainer: {} ----Train Acc: {:.2f}----- Loss: {:.4f}------".format(round, trainer_idx, acc, loss))
 
-        diff_trainer_dict = dict()
-        diff_i_dict = dict()
         R_i_dict = dict()
-        for trainer_idx in params_dict.keys():
-            trainer_w = params_dict[trainer_idx]
-            trainer_idx_verifier_loss = []
-            for round_1 in range(args.round1):
+        V_ij_dict = {}
+
+        diff_list = []
+
+        if round > 40:
+            for trainer_idx in params_dict.keys():
+                trainer_w = params_dict[trainer_idx]
+                trainer_idx_verifier_loss = []
                 for verifier_idx in verifier_dict.keys():
                     verifier = verifier_dict[verifier_idx]
                     loss_ij, acc_ver = verifier.test(trainer_w, device, verifier_idx, trainer_idx, round)
@@ -136,21 +128,36 @@ if __name__ == '__main__':
                     # trainer_idx_verifier_loss.append(loss_ij)
 
                     '''攻击者比例'''
-                    if verifier_idx in [0, 1, 2, 3, 4, 5]:
-                        if trainer_idx in [0, 1, 2, 3, 4, 5]:
+                    if verifier_idx in verifier_indices:
+                        if trainer_idx in malicious_indices:
                             trainer_idx_verifier_loss.append(loss_dict[trainer_idx])
                         else:
-                            trainer_idx_verifier_loss.append(loss_ij*20)
+                            trainer_idx_verifier_loss.append(loss_ij * 20)
                     else:
                         trainer_idx_verifier_loss.append(loss_ij)
 
-                diff_i = FL_REAC.cal_diff(trainer_idx_verifier_loss, loss_dict, trainer_idx)
-                diff_i_dict[round_1] = diff_i
-            sum_Gi = args.round1 * sum(verifier_dict)
-            R_i = FL_REAC.trust_score(diff_i_dict, sum_Gi)
-            R_i_dict[trainer_idx] = R_i
+                V_ij = 0
+                for id in range(len(trainer_idx_verifier_loss)):
+                    V_ij += abs(trainer_idx_verifier_loss[id] - loss_dict[trainer_idx])
+                V_ij_dict[trainer_idx] = V_ij
 
-        agg_weights = FL_REAC.cal_agg_weight(round, loss_dict, params_dict, R_i_dict, trainer_dict, data_num_dict, device)
+
+            for trainer_id in params_dict.keys():
+                diff_i = V_ij_dict[trainer_id] * len(loss_dict) / sum(V_ij_dict)
+                diff_list.append(diff_i)
+
+            for trainer_i in params_dict.keys():
+                if diff_list[trainer_i] <= 1:
+                    R_i = 1
+                else:
+                    R_i = (1/diff_list[trainer_i]) ** diff_list[trainer_i]
+                R_i_dict[trainer_i] = R_i
+        else:
+            for trainer_idxx in trainer_dict:
+                R_i_dict[trainer_idxx] = 1
+        anomaly_score_dict = FL_REAC.anomaly_score(params_dict, device)
+
+        agg_weights = FL_REAC.cal_agg_weight(round, loss_dict, R_i_dict, trainer_dict, data_num_dict, anomaly_score_dict)
         params = list(params_dict.values())
         global_model = aggregate_model(params, agg_weights)
         # agent_model.load_state_dict(global_model)
@@ -160,7 +167,7 @@ if __name__ == '__main__':
         acc_list.append(total_acc)
         print(f'----total acc:{total_acc:.2f}----')
 
-        with open('./pic/noise_attack_com2.txt', 'a') as f:
+        with open('./pic/backdoor_attack_com_45.txt', 'a') as f:
             f.write(str(total_acc) + '\n')
 
         for trainer_idx in trainer_dict.keys():

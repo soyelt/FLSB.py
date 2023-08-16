@@ -3,15 +3,6 @@ from torchvision import datasets, transforms
 import numpy as np
 
 
-# def iid_sampling(n_train, num_trainers, seed):
-#     np.random.seed(seed)
-#     num_items = int(n_train/num_trainers)
-#     dict_trainers, all_idxs = {}, [i for i in range(n_train)] # initial trainer and index for whole dataset
-#     for i in range(num_trainers):
-#         dict_trainers[i] = set(np.random.choice(all_idxs, num_items, replace=False))  # 'replace=False' make sure that there is no repeat
-#         all_idxs = list(set(all_idxs)-dict_trainers[i])
-#     return dict_trainers
-
 def get_dataset(args):
 
     if args.dataset == 'cifar10':
