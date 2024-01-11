@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 # 1. 设置随机种子
 np.random.seed(42)
 
+
 # 2. 随机抽样
 N = 10000
 x = np.random.uniform(-1, 1, N)
