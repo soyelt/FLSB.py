@@ -2,6 +2,7 @@ import math
 import statistics
 import torch
 import model_2
+from sklearn.metrics import confusion_matrix
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -23,6 +24,10 @@ class Agent(object):
         self.model.eval()
         correct = 0
         data_size = 0
+
+        true_labels = []
+        predicted_labels = []
+
         for batch_id, batch in enumerate(self.eva_loader):
             data, target = batch
             data_size += data.size()[0]
@@ -30,13 +35,17 @@ class Agent(object):
             target = target.to(device)
 
             output = self.model(data)
-
             pred = output.data.max(1)[1]
+
+            true_labels.extend(target.cpu().numpy())
+            predicted_labels.extend(pred.cpu().numpy())
+
             correct += pred.eq(target.data.view_as(pred)).cpu().sum().item()
 
         eval_acc = 100.0 * (float(correct) / float(data_size))
+        matrix = confusion_matrix(true_labels, predicted_labels)
 
-        return eval_acc
+        return eval_acc, matrix
 
 
 def cal_diff(trainer_idx_verifier_loss, loss_dict, trainer_idx):
@@ -108,4 +117,4 @@ def cal_agg_weight(diff_trainer_dict, loss_dict, params_dict, trainer_dict, data
 
     params = list(params_dict.values())
 
-    return params, agg_weights, test_di, test_li, Si_dict
+    return params, agg_weights, Di_dict, Li_dict, Si_dict
